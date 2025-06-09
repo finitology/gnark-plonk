@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/gob"
 	"fmt"
 	"github.com/consensys/gnark-crypto/ecc"
+	kzg "github.com/consensys/gnark-crypto/ecc/bn254/kzg"
 	"github.com/consensys/gnark/backend/plonk"
 	plonk_bn254 "github.com/consensys/gnark/backend/plonk/bn254"
 	cs "github.com/consensys/gnark/constraint/bn254"
@@ -11,6 +13,10 @@ import (
 	"github.com/consensys/gnark/test/unsafekzg"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"os"
+	"github.com/consensys/gnark-crypto/kzg/bn254"
+	"github.com/consensys/gnark-crypto/kzg"
+	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
+	"github.com/consensys/gnark-crypto/ecc/bn254/fr/fft"
 )
 
 type Input = frontend.Variable
@@ -25,11 +31,11 @@ type Circuit struct {
 
 // define circuit constraints
 func (circuit *Circuit) Define(api API) error {
-	a2 := api.Mul(circuit.A, circuit.A)
-	b2 := api.Mul(circuit.B, circuit.B)
-	c2 := api.Mul(circuit.C, circuit.C)
-	lhs := api.Add(a2, b2)
-	api.AssertIsEqual(lhs, c2)
+	// a2 := api.Mul(circuit.A, circuit.A)
+	// b2 := api.Mul(circuit.B, circuit.B)
+	// c2 := api.Mul(circuit.C, circuit.C)
+	lhs := api.Add(api.Mul(circuit.A, circuit.B), api.Mul(circuit.A, circuit.B))
+	api.AssertIsEqual(lhs, circuit.C)
 	return nil
 }
 
@@ -38,6 +44,47 @@ func SerializeProofSolidityBn254(proof plonk.Proof) string {
 	buf := proof.(*plonk_bn254.Proof).MarshalSolidity()
 	return hexutil.Encode(buf)
 }
+
+func ReadSRS(path string) (*kzg.SRS, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var srs kzg.SRS
+	decoder := gob.NewDecoder(file)
+	if err := decoder.Decode(&srs); err != nil {
+		return nil, err
+	}
+	return &srs, nil
+}
+
+
+
+// Read and compute Lagrange basis
+func ReadSRSWithLagrange(path string) (*kzg.SRS, []ecc.bn254.G1Affine, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer file.Close()
+
+	var srs kzg.SRS
+	decoder := gob.NewDecoder(file)
+	if err := decoder.Decode(&srs); err != nil {
+		return nil, nil, err
+	}
+
+	// Compute Lagrange basis from monomial G1 points
+	domain := fft.NewDomain(uint64(len(srs.G1)), nil) // size must match srs.G1
+	srsLagrange := make([]bn254.G1Affine, len(srs.G1))
+	copy(srsLagrange, srs.G1)
+	fft.BitReverse(srsLagrange)           // required by FFT
+	fft.FFT(srsLagrange, domain, fft.DIF) // FFT to Lagrange basis
+	return &srs, srsLagrange, nil
+}
+
 
 func main() {
 
@@ -51,16 +98,20 @@ func main() {
 		fmt.Println(err)
 	}
 
-	srs, srsLagrange, err := unsafekzg.NewSRS(ccs.(*cs.SparseR1CS))
-	if err != nil {
-		fmt.Println(err)
-	}
+	/*
+		srs, srsLagrange, err := unsafekzg.NewSRS(ccs.(*cs.SparseR1CS))
+		if err != nil {
+			fmt.Println(err)
+		}*/
+
+	s, err := ReadSRS("srs.gob")
+	srs, srsLagrange, err := s.ReadFrom()
 
 	{
 		var w Circuit
-		w.A = 3
-		w.B = 4
-		w.C = 5
+		w.A = 5
+		w.B = 12
+		w.C = 120
 
 		witnessFull, err := frontend.NewWitness(&w, scalarField)
 		if err != nil {
